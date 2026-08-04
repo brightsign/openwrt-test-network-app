@@ -1,0 +1,8 @@
+#!/bin/sh
+
+case "$ACTION" in
+	ifup|ifupdate)
+		# Avoid blocking netifd while an interface settles.
+		( sleep 2; /etc/init.d/netlab restart ) &
+		;;
+esac

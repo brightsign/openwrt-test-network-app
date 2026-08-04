@@ -1,0 +1,352 @@
+openapi: 3.1.0
+info:
+  title: netlab Impairment Control API
+  version: 1.0.0
+  description: |
+    REST API for controlling network impairment on an OpenWrt test router.
+
+    The router shapes traffic per direction using `tc`/`netem`:
+      - `upload`   = WAN egress   (traffic from test clients toward the internet)
+      - `download` = br-lan egress (traffic from the internet toward test clients)
+
+    The API writes validated values into the `netlab` UCI config and reloads the
+    `/etc/init.d/netlab` service, so changes persist across reboots and WAN
+    reconnects.
+
+    Security note: this deployment ships without authentication and is intended
+    for a trusted/isolated WAN. Do not expose it to an untrusted network.
+servers:
+  - url: http://{host}:{port}
+    variables:
+      host:
+        default: 192.168.1.1
+        description: Router WAN address
+      port:
+        default: '8080'
+paths:
+  /healthz:
+    get:
+      operationId: getHealth
+      summary: Liveness probe
+      tags: [system]
+      responses:
+        '200':
+          description: Service is up
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+  /openapi.yaml:
+    get:
+      operationId: getOpenApi
+      summary: This OpenAPI document
+      tags: [system]
+      responses:
+        '200':
+          description: OpenAPI specification
+          content:
+            application/yaml:
+              schema:
+                type: string
+  /api/v1/impairment:
+    get:
+      operationId: getImpairment
+      summary: Get the current impairment profile
+      tags: [impairment]
+      responses:
+        '200':
+          description: Current profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+    put:
+      operationId: replaceImpairment
+      summary: Replace the full impairment profile and apply it
+      tags: [impairment]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Profile'
+            examples:
+              symmetric20:
+                summary: Symmetric 20 Mbit, 50 ms, 10 ms jitter, 1% loss
+                value:
+                  enabled: true
+                  queueLimit: 1000
+                  upload: { rateMbit: 20, delayMs: 50, jitterMs: 10, lossPct: 1 }
+                  download: { rateMbit: 20, delayMs: 50, jitterMs: 10, lossPct: 1 }
+      responses:
+        '200':
+          description: Applied profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    patch:
+      operationId: patchImpairment
+      summary: Partially update the impairment profile and apply it
+      description: |
+        Any subset of fields may be supplied. Provided direction objects are
+        merged field-by-field with the stored configuration.
+      tags: [impairment]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfilePatch'
+            examples:
+              raiseDownloadLoss:
+                summary: Only change download loss
+                value:
+                  download: { lossPct: 5 }
+      responses:
+        '200':
+          description: Applied profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      operationId: clearImpairment
+      summary: Clear all impairment
+      description: Disables the profile and tears down the live qdiscs on both devices.
+      tags: [impairment]
+      responses:
+        '200':
+          description: Resulting (disabled) profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/v1/status:
+    get:
+      operationId: getStatus
+      summary: Live shaping status
+      description: Resolved Linux devices and current tc qdisc counters per direction.
+      tags: [status]
+      responses:
+        '200':
+          description: Live status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Status'
+  /api/v1/profiles:
+    get:
+      operationId: listProfiles
+      summary: List preset profiles
+      tags: [profiles]
+      responses:
+        '200':
+          description: Available presets
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  profiles:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Preset'
+  /api/v1/profiles/{name}/apply:
+    post:
+      operationId: applyProfile
+      summary: Apply a preset profile
+      tags: [profiles]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [clean-constrained, good-lte, poor-lte, satellite-like, severe-failure]
+      responses:
+        '200':
+          description: Applied preset
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  applied:
+                    type: string
+                  profile:
+                    $ref: '#/components/schemas/Profile'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+components:
+  schemas:
+    Direction:
+      type: object
+      description: Impairment for one direction.
+      properties:
+        rateMbit:
+          type: number
+          minimum: 0
+          description: Bandwidth cap in Mbit/s. 0 means unlimited.
+          example: 20
+        delayMs:
+          type: number
+          minimum: 0
+          description: One-way added delay in milliseconds.
+          example: 50
+        jitterMs:
+          type: number
+          minimum: 0
+          description: Delay variation in milliseconds.
+          example: 10
+        lossPct:
+          type: number
+          minimum: 0
+          maximum: 100
+          description: Random packet loss percentage.
+          example: 1
+      required: [rateMbit, delayMs, jitterMs, lossPct]
+    DirectionPatch:
+      type: object
+      description: Partial impairment for one direction (any subset of fields).
+      properties:
+        rateMbit:
+          type: number
+          minimum: 0
+        delayMs:
+          type: number
+          minimum: 0
+        jitterMs:
+          type: number
+          minimum: 0
+        lossPct:
+          type: number
+          minimum: 0
+          maximum: 100
+    Profile:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+          description: Whether impairment is applied at boot/reload.
+        queueLimit:
+          type: integer
+          minimum: 1
+          description: netem queue length in packets.
+          example: 1000
+        upload:
+          $ref: '#/components/schemas/Direction'
+        download:
+          $ref: '#/components/schemas/Direction'
+      required: [enabled, queueLimit, upload, download]
+    ProfilePatch:
+      type: object
+      minProperties: 1
+      properties:
+        enabled:
+          type: boolean
+        queueLimit:
+          type: integer
+          minimum: 1
+        upload:
+          $ref: '#/components/schemas/DirectionPatch'
+        download:
+          $ref: '#/components/schemas/DirectionPatch'
+    Preset:
+      type: object
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        profile:
+          $ref: '#/components/schemas/Profile'
+    QdiscStatus:
+      type: object
+      properties:
+        device:
+          type: [string, 'null']
+        raw:
+          type: [string, 'null']
+          description: Raw `tc -s qdisc show` output.
+        stats:
+          type: [object, 'null']
+          properties:
+            sentBytes:
+              type: integer
+            sentPackets:
+              type: integer
+            dropped:
+              type: integer
+            overlimits:
+              type: integer
+    Status:
+      type: object
+      properties:
+        interfaces:
+          type: object
+          properties:
+            wan:
+              $ref: '#/components/schemas/InterfaceMap'
+            test:
+              $ref: '#/components/schemas/InterfaceMap'
+        upload:
+          $ref: '#/components/schemas/QdiscStatus'
+        download:
+          $ref: '#/components/schemas/QdiscStatus'
+    InterfaceMap:
+      type: object
+      properties:
+        logical:
+          type: string
+          example: wan
+        device:
+          type: [string, 'null']
+          example: eth0
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+          required: [code, message]
+      required: [error]
+  responses:
+    ValidationError:
+      description: The request body failed validation.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    InternalError:
+      description: A command executed on the router failed.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'

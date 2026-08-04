@@ -1,0 +1,18 @@
+config netlab 'main'
+	option enabled '1'
+	option wan_interface 'wan'
+	option test_interface 'lan'
+
+	# Upload: test clients -> WAN
+	option upload_rate '20mbit'
+	option upload_delay '50ms'
+	option upload_jitter '10ms'
+	option upload_loss '1%'
+
+	# Download: WAN -> test clients
+	option download_rate '20mbit'
+	option download_delay '50ms'
+	option download_jitter '10ms'
+	option download_loss '1%'
+
+	option queue_limit '1000'
